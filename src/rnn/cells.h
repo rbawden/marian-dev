@@ -1068,6 +1068,9 @@ public:
     auto nextCellState = highway(cellState, x, f);  // rename to "gate"?
     auto nextState = relu(nextCellState);
 
+    nextCellState->debug("nextCellState");
+    nextState->debug("nextState");
+
     auto maskedCellState = mask ? mask * nextCellState : nextCellState;
     auto maskedState = mask ? mask * nextState : nextState;
 
@@ -1080,46 +1083,45 @@ public:
 template <Type Type_, typename = cpu::integer::EnableIfTypeIsSupported<Type_>>
 class SSRUInteger : public Cell {
 private:
-  Expr W_;
-  Expr Wf_, bf_;
-
-  float dropout_;
-  Expr dropMaskX_;
-
-  float layerNorm_;
-  Expr gamma_, gammaf_;
+  Expr W_, Wf_, bf_;
+  Expr sigmoidLUT;
+  Expr quant_mult_W_, quant_mult_Wf_;
+  Expr scale_W_, scale_Wf_;
+  // Expr quant_mult_alpha;
 
   using impl = cpu::integer::ops<Type_>;
 
 public:
   SSRUInteger(Ptr<ExpressionGraph> graph, Ptr<Options> options) : Cell(options) {
-    int dimInput = options_->get<int>("dimInput");
-    int dimState = options_->get<int>("dimState");
+    auto dimInput = options_->get<int>("dimInput");
+    auto dimState = options_->get<int>("dimState");
+    auto prefix = options->get<std::string>("prefix");
 
-    std::string prefix = options->get<std::string>("prefix");
+    ABORT_IF(dimInput != dimState, "For SSRUInteger state and input dims have to be equal");
 
-    ABORT_IF(dimInput != dimState,
-             "For SSRUInteger state and input dims have to be equal");
-
-    dropout_ = opt<float>("dropout", 0);
-    layerNorm_ = opt<bool>("layer-normalization", false);
-
-    W_ = graph->param(
-        prefix + "_W", {dimInput, dimInput}, inits::glorot_uniform);
-
-    Wf_ = graph->param(
-        prefix + "_Wf", {dimInput, dimInput}, inits::glorot_uniform);
+    W_ = graph->param(prefix + "_W", {dimInput, dimInput}, inits::glorot_uniform);
+    Wf_ = graph->param(prefix + "_Wf", {dimInput, dimInput}, inits::glorot_uniform);
     bf_ = graph->param(prefix + "_bf", {1, dimInput}, inits::zeros);
 
-    if(dropout_ > 0.0f) {
-      dropMaskX_ = graph->dropout(dropout_, {1, dimInput});
-    }
+    auto graph_expmap = graph->getNameMap();
+    auto graph_namedmap = graph->getRevNameMap();
+    sigmoidLUT = graph_expmap["F0::sigmoid_lut"];
 
-    if(layerNorm_) {
-      if(dimInput)
-        gamma_ = graph->param(prefix + "_gamma", {1, dimState}, inits::ones);
-      gammaf_ = graph->param(prefix + "_gammaf", {1, dimState}, inits::ones);
-    }
+    quant_mult_W_ = impl::quantMult(W_);
+    quant_mult_Wf_ = impl::quantMult(Wf_);
+
+    // auto Wf_alpha_name = graph_namedmap[Wf_];
+    // if (Wf_alpha_name == "")
+    //   Wf_alpha_name = "F0::unnamed_alpha";
+    // else
+    //   Wf_alpha_name += "_alpha";
+    // quant_mult_alpha = graph_expmap[Wf_alpha_name];
+
+    W_ = impl::prepareB(W_, quant_mult_W_);
+    Wf_ = impl::prepareB(Wf_, quant_mult_Wf_);
+
+    scale_W_ = 127.0 / quant_mult_W_;
+    scale_Wf_ = 127.0 / quant_mult_Wf_;
   }
 
   State apply(std::vector<Expr> inputs, State state, Expr mask = nullptr) {
@@ -1135,32 +1137,39 @@ public:
     else
       input = inputs.front();
 
-    auto inputDropped = dropMaskX_ ? dropout(input, dropMaskX_) : input;
+    Expr quant_mult_input = impl::quantMult(input);
 
-    Expr x, f;
-    if(layerNorm_) {
-      x = layerNorm(dot(inputDropped, W_), gamma_);
-      f = layerNorm(dot(inputDropped, Wf_), gammaf_, bf_);
-    } else {
-      x = dot(inputDropped, W_);
-      f = affine(inputDropped, Wf_, bf_);
-    }
+    input = impl::quantize(input, quant_mult_input);
+    bf_ = impl::PrepareBiasForB(bf_, Wf_, quant_mult_input, quant_mult_Wf_);
+    sigmoidLUT = impl::quantize(sigmoidLUT, quant_mult_input);
 
-    return {x, f};
+    Expr sigmoid_f = impl::SSRUSigmoidF(input, Wf_, bf_, scale_Wf_, sigmoidLUT);
+    Expr precomputed_part_of_highway = impl::SSRUPrecomputedPartOfHighway(input, W_, sigmoid_f, scale_W_);
+
+    sigmoid_f->debug("sigmoid_f");
+    precomputed_part_of_highway->debug("precomputed_part_of_highway");
+
+    return {precomputed_part_of_highway, sigmoid_f};
   }
 
   State applyState(std::vector<Expr> xWs, State state, Expr mask = nullptr) override {
     auto recState = state.output;
     auto cellState = state.cell;
 
-    auto x = xWs[0];
-    auto f = xWs[1];
+    auto precomputed_part_of_highway = xWs[0];
+    auto sigmoid_f = xWs[1];
 
-    auto nextCellState = highway(cellState, x, f);  // rename to "gate"?
-    auto nextState = relu(nextCellState);
+    auto left_part_of_highway = impl::elemwiseMul(cellState, sigmoid_f, sizeOf(Type_) - 1);
+    left_part_of_highway->debug("left_part_of_highway");
 
-    auto maskedCellState = mask ? mask * nextCellState : nextCellState;
-    auto maskedState = mask ? mask * nextState : nextState;
+    auto nextCellState = impl::elemwiseAdd(impl::elemwiseMul(cellState, sigmoid_f, sizeOf(Type_) - 1), precomputed_part_of_highway);
+    auto nextState = impl::relu(nextCellState);
+
+    nextCellState->debug("nextCellState");
+    nextState->debug("nextState");
+
+    auto maskedCellState = !mask ? nextCellState : impl::elemwiseRescale(nextCellState, mask);
+    auto maskedState = !mask ? nextState : impl::elemwiseRescale(nextState, mask);
 
     return {maskedState, maskedCellState};
   }
