@@ -647,7 +647,7 @@ public:
 private:
   Shape newShape(Expr a, Expr b) {
     Shape result = a->shape();
-    result.set(-1, b->shape()[-1]);
+    result.set(-1, b->shape()[-1]); // TODO: Check if b->shape()[-1] is correct (b is prepared so transposed)
     return result;
   }
 };

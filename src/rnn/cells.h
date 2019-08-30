@@ -1046,6 +1046,8 @@ public:
 
     auto inputDropped = dropMaskX_ ? dropout(input, dropMaskX_) : input;
 
+    input->debug("input");
+
     Expr x, f;
     if(layerNorm_) {
       x = layerNorm(dot(inputDropped, W_), gamma_);
@@ -1054,6 +1056,12 @@ public:
       x = dot(inputDropped, W_);
       f = affine(inputDropped, Wf_, bf_);
     }
+
+    W_->debug("W_");
+    Wf_->debug("Wf_");
+    bf_->debug("bf_");
+    x->debug("x");
+    f->debug("f");
 
     return {x, f};
   }
@@ -1083,11 +1091,10 @@ public:
 template <Type Type_, typename = cpu::integer::EnableIfTypeIsSupported<Type_>>
 class SSRUInteger : public Cell {
 private:
-  Expr W_, Wf_, bf_;
-  Expr sigmoidLUT;
+  Expr prepared_W_, prepared_Wf_, bf_;
   Expr quant_mult_W_, quant_mult_Wf_;
   Expr scale_W_, scale_Wf_;
-  // Expr quant_mult_alpha;
+  Expr sigmoidLUT;
 
   using impl = cpu::integer::ops<Type_>;
 
@@ -1099,9 +1106,13 @@ public:
 
     ABORT_IF(dimInput != dimState, "For SSRUInteger state and input dims have to be equal");
 
-    W_ = graph->param(prefix + "_W", {dimInput, dimInput}, inits::glorot_uniform);
-    Wf_ = graph->param(prefix + "_Wf", {dimInput, dimInput}, inits::glorot_uniform);
+    auto W_ = graph->param(prefix + "_W", {dimInput, dimInput}, inits::glorot_uniform);
+    auto Wf_ = graph->param(prefix + "_Wf", {dimInput, dimInput}, inits::glorot_uniform);
     bf_ = graph->param(prefix + "_bf", {1, dimInput}, inits::zeros);
+
+    W_->debug("W_");
+    Wf_->debug("Wf_");
+    bf_->debug("bf_");
 
     auto graph_expmap = graph->getNameMap();
     auto graph_namedmap = graph->getRevNameMap();
@@ -1110,18 +1121,14 @@ public:
     quant_mult_W_ = impl::quantMult(W_);
     quant_mult_Wf_ = impl::quantMult(Wf_);
 
-    // auto Wf_alpha_name = graph_namedmap[Wf_];
-    // if (Wf_alpha_name == "")
-    //   Wf_alpha_name = "F0::unnamed_alpha";
-    // else
-    //   Wf_alpha_name += "_alpha";
-    // quant_mult_alpha = graph_expmap[Wf_alpha_name];
-
-    W_ = impl::prepareB(W_, quant_mult_W_);
-    Wf_ = impl::prepareB(Wf_, quant_mult_Wf_);
+    quant_mult_W_->debug("quant_mult_W_");
+    quant_mult_Wf_->debug("quant_mult_Wf_");
 
     scale_W_ = 127.0 / quant_mult_W_;
     scale_Wf_ = 127.0 / quant_mult_Wf_;
+
+    prepared_W_ = impl::prepareB(W_, quant_mult_W_);
+    prepared_Wf_ = impl::prepareB(Wf_, quant_mult_Wf_);
   }
 
   State apply(std::vector<Expr> inputs, State state, Expr mask = nullptr) {
@@ -1137,17 +1144,24 @@ public:
     else
       input = inputs.front();
 
-    Expr quant_mult_input = impl::quantMult(input);
+    input->debug("input");
+    auto quant_mult_input = impl::quantMult(input);
+    quant_mult_input->debug("quant_mult_input");
 
-    input = impl::quantize(input, quant_mult_input);
-    bf_ = impl::PrepareBiasForB(bf_, Wf_, quant_mult_input, quant_mult_Wf_);
-    sigmoidLUT = impl::quantize(sigmoidLUT, quant_mult_input);
+    // auto quantized_input = impl::prepareA(input, quant_mult_input);
+    // auto prepared_bf_ = impl::PrepareBiasForB(bf_, prepared_Wf_, quant_mult_input, quant_mult_Wf_);
+    auto quantized_input = impl::prepareAOld(input, quant_mult_input);
+    auto prepared_bf_ = impl::quantize(bf_, quant_mult_input * quant_mult_Wf_);
+    auto quantized_sigmoidLUT = impl::quantize(sigmoidLUT, quant_mult_input);
 
-    Expr sigmoid_f = impl::SSRUSigmoidF(input, Wf_, bf_, scale_Wf_, sigmoidLUT);
-    Expr precomputed_part_of_highway = impl::SSRUPrecomputedPartOfHighway(input, W_, sigmoid_f, scale_W_);
+    quantized_sigmoidLUT->debug("quantized_sigmoidLUT");
+    quantized_input->debug("quantized_input");
+    prepared_Wf_->debug("prepared_Wf_");
 
-    sigmoid_f->debug("sigmoid_f");
-    precomputed_part_of_highway->debug("precomputed_part_of_highway");
+    Expr xxx = 1.0 / (quant_mult_Wf_ * quant_mult_input);
+    xxx->debug("xxx");
+    auto sigmoid_f = impl::SSRUSigmoidF(quantized_input, prepared_Wf_, prepared_bf_, xxx, quantized_sigmoidLUT);
+    auto precomputed_part_of_highway = impl::SSRUPrecomputedPartOfHighway(quantized_input, prepared_W_, sigmoid_f, scale_W_);
 
     return {precomputed_part_of_highway, sigmoid_f};
   }
@@ -1156,15 +1170,17 @@ public:
     auto recState = state.output;
     auto cellState = state.cell;
 
-    auto precomputed_part_of_highway = xWs[0];
+    auto right_part_of_highway = xWs[0];
     auto sigmoid_f = xWs[1];
 
-    auto left_part_of_highway = impl::elemwiseMul(cellState, sigmoid_f, sizeOf(Type_) - 1);
-    left_part_of_highway->debug("left_part_of_highway");
+    cellState->debug("cellState");
 
-    auto nextCellState = impl::elemwiseAdd(impl::elemwiseMul(cellState, sigmoid_f, sizeOf(Type_) - 1), precomputed_part_of_highway);
+    auto left_part_of_highway = impl::elemwiseMul(cellState, sigmoid_f, 8 * sizeOf(Type_));
+    auto nextCellState = impl::elemwiseAdd(left_part_of_highway, right_part_of_highway);
     auto nextState = impl::relu(nextCellState);
-
+    sigmoid_f->debug("sigmoid_f");
+    left_part_of_highway->debug("left_part_of_highway");
+    right_part_of_highway->debug("right_part_of_highway");
     nextCellState->debug("nextCellState");
     nextState->debug("nextState");
 
@@ -1176,7 +1192,7 @@ public:
 };
 
 using SSRUInt8 = SSRUInteger<Type::int8>;
-using SSRUInt16 = SSRUInteger<Type::int16>;
+// using SSRUInt16 = SSRUInteger<Type::int16>;
 
 // class LSSRU : public Cell {
 // private:
