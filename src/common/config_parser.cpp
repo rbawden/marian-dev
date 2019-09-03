@@ -513,6 +513,9 @@ void ConfigParser::addOptionsTranslation(cli::CLIWrapper& cli) {
   cli.add<std::string>("--alignment",
      "Return word alignment. Possible values: 0.0-1.0, hard, soft")
     ->implicit_val("1");
+  cli.add<int>("--nth-code",
+	       "Only select hypotheses with the nth best first token. Starting at 1", 0);
+
 
   addSuboptionsDevices(cli);
   addSuboptionsInputLength(cli);
@@ -563,8 +566,8 @@ void ConfigParser::addOptionsScoring(cli::CLIWrapper& cli) {
       "Only print total cost, possible values: cross-entropy (ce-mean), ce-mean-words, ce-sum, perplexity")
       ->implicit_val("cross-entropy");
   cli.add<std::string>("--alignment",
-     "Return word alignments. Possible values: 0.0-1.0, hard, soft")
-     ->implicit_val("1"),
+		       "Return word alignments. Possible values: 0.0-1.0, hard, soft")
+    ->implicit_val("1");
 
   addSuboptionsInputLength(cli);
   addSuboptionsDevices(cli);

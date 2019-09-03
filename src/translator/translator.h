@@ -33,7 +33,7 @@ public:
     // This is currently safe as the translator is either created stand-alone or
     // or config is created anew from Options in the validator
     options_->set("inference", true);
-
+    
     corpus_ = New<data::Corpus>(options_, true);
 
     auto vocabs = options_->get<std::vector<std::string>>("vocabs");
@@ -100,7 +100,7 @@ public:
         }
 
         auto search = New<Search>(options_, scorers, trgVocab_->getEosId(), trgVocab_->getUnkId());
-        auto histories = search->search(graph, batch);
+        auto histories = search->search(graph, batch, options_->get<int>("nth-code"));
 
         for(auto history : histories) {
           std::stringstream best1;
@@ -111,7 +111,6 @@ public:
                            bestn.str(),
                            options_->get<bool>("n-best"));
         }
-
 
         // progress heartbeat for MS-internal Philly compute cluster
         // otherwise this job may be killed prematurely if no log for 4 hrs

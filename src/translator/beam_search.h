@@ -39,6 +39,7 @@ public:
                size_t beamSize,
                bool first,
                Ptr<data::CorpusBatch> batch) {
+
     Beams newBeams(beams.size());
 
     std::vector<float> align;
@@ -154,8 +155,37 @@ public:
     return newBeams;
   }
 
+  Beams getNthCode(const Beams& beams, size_t n, size_t beamsize) {
+    Beams newBeams;
+    for(auto beam : beams) {
+      Beam newBeam;
+      size_t i = 1;
+      for(auto hyp : beam) {
+
+	std::cerr << "beam hypothesis id = " << hyp->GetWord() << std::endl;
+	
+        if(i == n && hyp->GetWord() != trgEosId_) {
+	  std::cerr << "found it in the beam at id " << i << std::endl;
+          newBeam.push_back(hyp);
+
+	  // now push some dumy hypotheses
+	  for (size_t j=0; j < beamsize; j++)
+	    newBeam.push_back(New<Hypothesis>(New<Hypothesis>(), 1, 0, -9999999));
+        }
+	//else{
+	//  
+	//  std::cerr << "Adding dummy hypothesis at beam " << i << std::endl;
+	//}
+	i++;
+      }
+      std::cout << "beam size in getNthCode = " << beam.size() << std::endl;
+      newBeams.push_back(newBeam);
+    }
+    return newBeams;
+  }
+
   // main decoding function
-  Histories search(Ptr<ExpressionGraph> graph, Ptr<data::CorpusBatch> batch) {
+  Histories search(Ptr<ExpressionGraph> graph, Ptr<data::CorpusBatch> batch, int n_code = 0) {
     int dimBatch = (int)batch->size();
 
     Histories histories;
@@ -167,7 +197,18 @@ public:
       histories.push_back(history);
     }
 
-    size_t localBeamSize = beamSize_; // max over beam sizes of active sentence hypotheses
+    bool first = true;
+    bool final = false;
+
+    // if n asked for is bigger than the beamsize, adust the beam size for this step
+    size_t localBeamSize;
+    if(n_code > (int)beamSize_){
+      std::cerr << "N is larger than the beam size, so artificially setting beamsize to N for first step " << std::endl;
+      localBeamSize = (size_t)n_code;
+    }
+    else {
+      localBeamSize = beamSize_; // max over beam sizes of active sentence hypotheses
+    }
 
     auto getNBestList = createGetNBestListFn(localBeamSize, dimBatch, graph->getDeviceId());
 
@@ -175,8 +216,6 @@ public:
     for(auto& beam : beams)
       beam.resize(localBeamSize, New<Hypothesis>());
 
-    bool first = true;
-    bool final = false;
 
     for(int i = 0; i < dimBatch; ++i)
       histories[i]->Add(beams[i], trgEosId_);
@@ -277,11 +316,18 @@ public:
                      batch);
 
       auto prunedBeams = pruneBeam(beams);
+
+      // Get Nth code
+      std::cerr << "first = " << first << ", n_code = " << n_code << std::endl;
+      if(first && n_code > 0){
+	prunedBeams = getNthCode(beams, n_code, beamSize_);
+      }
+
       for(int i = 0; i < dimBatch; ++i) {
         if(!beams[i].empty()) {
           final = final
                   || histories[i]->size()
-                         >= options_->get<float>("max-length-factor")
+	             >=options_->get<float>("max-length-factor")
                                 * batch->front()->batchWidth();
           histories[i]->Add(
               beams[i], trgEosId_, prunedBeams[i].empty() || final);
@@ -297,7 +343,10 @@ public:
             maxBeam = beam.size();
         localBeamSize = maxBeam;
       }
-      first = false;
+      if(first){
+	first = false;
+	localBeamSize = beamSize_;
+      }
 
     } while(localBeamSize != 0 && !final); // end of main loop over output tokens
 
