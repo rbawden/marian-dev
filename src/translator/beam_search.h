@@ -162,23 +162,16 @@ public:
       size_t i = 1;
       for(auto hyp : beam) {
 
-	std::cerr << "beam hypothesis id = " << hyp->GetWord() << std::endl;
-	
         if(i == n && hyp->GetWord() != trgEosId_) {
-	  std::cerr << "found it in the beam at id " << i << std::endl;
           newBeam.push_back(hyp);
 
 	  // now push some dumy hypotheses
 	  for (size_t j=0; j < beamsize; j++)
 	    newBeam.push_back(New<Hypothesis>(New<Hypothesis>(), 1, 0, -9999999));
         }
-	//else{
-	//  
-	//  std::cerr << "Adding dummy hypothesis at beam " << i << std::endl;
-	//}
+
 	i++;
       }
-      std::cout << "beam size in getNthCode = " << beam.size() << std::endl;
       newBeams.push_back(newBeam);
     }
     return newBeams;
@@ -203,7 +196,6 @@ public:
     // if n asked for is bigger than the beamsize, adust the beam size for this step
     size_t localBeamSize;
     if(n_code > (int)beamSize_){
-      std::cerr << "N is larger than the beam size, so artificially setting beamsize to N for first step " << std::endl;
       localBeamSize = (size_t)n_code;
     }
     else {
@@ -318,7 +310,6 @@ public:
       auto prunedBeams = pruneBeam(beams);
 
       // Get Nth code
-      std::cerr << "first = " << first << ", n_code = " << n_code << std::endl;
       if(first && n_code > 0){
 	prunedBeams = getNthCode(beams, n_code, beamSize_);
       }
